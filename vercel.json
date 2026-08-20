@@ -1,0 +1,8 @@
+{
+  "rewrites": [
+    {
+      "source": "/api/proxy/:path*",
+      "destination": "https://opencode.ai/zen/go/v1/:path*"
+    }
+  ]
+}
