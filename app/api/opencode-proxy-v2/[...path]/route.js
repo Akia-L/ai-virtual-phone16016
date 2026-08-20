@@ -1,13 +1,15 @@
 // app/api/opencode-proxy-v2/[...path]/route.js
 
-// 改成你实际使用的 OpenCodeGo Base URL，结尾不要加斜杠
+// 目标 OpenCodeGo Base URL，结尾不要加斜杠
 const TARGET_BASE = 'https://opencode.ai/zen/go/v1';
+
+// 设置函数最大持续时间（秒），Netlify 免费计划最高 26 秒
+export const maxDuration = 26;
 
 function corsHeaders(extra = {}) {
   const headers = new Headers(extra);
   headers.set('Access-Control-Allow-Origin', '*');
   headers.set('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
-  // 允许所有常见请求头，避免预检失败
   headers.set('Access-Control-Allow-Headers', '*');
   return headers;
 }
@@ -50,7 +52,11 @@ export async function GET(req, { params }) {
 export async function POST(req, { params }) {
   const path = await getPath(params);
   const targetUrl = `${TARGET_BASE}/${path}`;
-  const bodyText = await req.text(); // 保留原始请求体，避免流式请求体被重复解析
+  const bodyText = await req.text();
+
+  // 设置上游请求超时：25 秒，留 1 秒给函数返回错误，避免客户端无限挂起
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), 25000);
 
   try {
     const upstream = await fetch(targetUrl, {
@@ -60,12 +66,13 @@ export async function POST(req, { params }) {
         'Content-Type': req.headers.get('content-type') || 'application/json',
       },
       body: bodyText,
+      signal: controller.signal,
     });
 
     const contentType = upstream.headers.get('content-type') || 'application/json';
     const headers = corsHeaders({ 'Content-Type': contentType });
 
-    // 如果上游返回的是流式数据，直接透传响应体，不要尝试解析
+    // 如果上游返回流式内容，直接透传响应体，不要尝试解析
     if (
       contentType.includes('text/event-stream') ||
       contentType.includes('application/x-ndjson') ||
@@ -90,6 +97,8 @@ export async function POST(req, { params }) {
         headers: corsHeaders({ 'Content-Type': 'application/json' }),
       }
     );
+  } finally {
+    clearTimeout(timeout);
   }
 }
 
