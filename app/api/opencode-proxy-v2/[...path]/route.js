@@ -1,9 +1,7 @@
 // app/api/opencode-proxy-v2/[...path]/route.js
 
-// 目标 OpenCodeGo Base URL，结尾不要加斜杠
 const TARGET_BASE = 'https://opencode.ai/zen/go/v1';
 
-// 设置函数最大持续时间（秒），Netlify 免费计划最高 26 秒
 export const maxDuration = 26;
 
 function corsHeaders(extra = {}) {
@@ -15,8 +13,13 @@ function corsHeaders(extra = {}) {
 }
 
 async function getPath(params) {
-  const p = await params; // 兼容 Next.js 15
+  const p = await params;
   return (p?.path || []).join('/');
+}
+
+// 生成一个简单的随机会话 ID
+function generateSessionId() {
+  return `session-${Date.now()}-${Math.random().toString(36).slice(2, 10)}`;
 }
 
 export async function GET(req, { params }) {
@@ -24,11 +27,16 @@ export async function GET(req, { params }) {
   const targetUrl = `${TARGET_BASE}/${path}`;
 
   try {
+    // 复制客户端所有请求头
+    const headers = new Headers(req.headers);
+    // 确保有 x-opencode-session
+    if (!headers.has('x-opencode-session')) {
+      headers.set('x-opencode-session', generateSessionId());
+    }
+
     const upstream = await fetch(targetUrl, {
       method: 'GET',
-      headers: {
-        Authorization: req.headers.get('authorization') || '',
-      },
+      headers,
     });
 
     const body = await upstream.text();
@@ -52,27 +60,44 @@ export async function GET(req, { params }) {
 export async function POST(req, { params }) {
   const path = await getPath(params);
   const targetUrl = `${TARGET_BASE}/${path}`;
-  const bodyText = await req.text();
 
-  // 设置上游请求超时：25 秒，留 1 秒给函数返回错误，避免客户端无限挂起
+  const bodyTextRaw = await req.text();
+  let body;
+  try {
+    body = JSON.parse(bodyTextRaw);
+  } catch (e) {
+    body = bodyTextRaw;
+  }
+
+  // 删除上游不支持的采样参数
+  if (body && typeof body === 'object') {
+    delete body.min_p;
+    delete body.logit_bias;
+  }
+
+  const bodyText = typeof body === 'string' ? body : JSON.stringify(body);
+
+  // 复制客户端所有请求头
+  const headers = new Headers(req.headers);
+  // 确保有 x-opencode-session
+  if (!headers.has('x-opencode-session')) {
+    headers.set('x-opencode-session', generateSessionId());
+  }
+
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), 25000);
 
   try {
     const upstream = await fetch(targetUrl, {
       method: 'POST',
-      headers: {
-        Authorization: req.headers.get('authorization') || '',
-        'Content-Type': req.headers.get('content-type') || 'application/json',
-      },
+      headers,
       body: bodyText,
       signal: controller.signal,
     });
 
     const contentType = upstream.headers.get('content-type') || 'application/json';
-    const headers = corsHeaders({ 'Content-Type': contentType });
+    const responseHeaders = corsHeaders({ 'Content-Type': contentType });
 
-    // 如果上游返回流式内容，直接透传响应体，不要尝试解析
     if (
       contentType.includes('text/event-stream') ||
       contentType.includes('application/x-ndjson') ||
@@ -80,14 +105,14 @@ export async function POST(req, { params }) {
     ) {
       return new Response(upstream.body, {
         status: upstream.status,
-        headers,
+        headers: responseHeaders,
       });
     }
 
-    const body = await upstream.text();
-    return new Response(body, {
+    const data = await upstream.text();
+    return new Response(data, {
       status: upstream.status,
-      headers,
+      headers: responseHeaders,
     });
   } catch (error) {
     return new Response(
